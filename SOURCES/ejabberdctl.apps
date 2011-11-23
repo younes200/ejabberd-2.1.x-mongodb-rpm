@@ -1,0 +1,5 @@
+USER=root
+PROGRAM=/usr/sbin/ejabberdctl
+SESSION=yes
+FALLBACK=no
+GUI=no

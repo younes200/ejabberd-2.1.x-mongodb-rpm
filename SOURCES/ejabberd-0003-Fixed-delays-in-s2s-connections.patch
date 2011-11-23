@@ -1,0 +1,53 @@
+From 896c955b7ff0e7b01cce88d18858c2eb57609af5 Mon Sep 17 00:00:00 2001
+From: Sergei Golovan <sgolovan@nes.ru>
+Date: Tue, 16 Feb 2010 16:07:37 +0300
+Subject: [PATCH 03/11] Fixed delays in s2s connections.
+
+Patch by Sergei Golovan increases timeouts in S2S and removes horrible 5-minute
+delay between remote server connection attempts after a falure (in case of
+server is down it would be reasonable, but what happens much more often is a
+network split when the delay is inadmissible).
+---
+ src/ejabberd_s2s_in.erl  |    2 +-
+ src/ejabberd_s2s_out.erl |    5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/ejabberd_s2s_in.erl b/src/ejabberd_s2s_in.erl
+index 848e58c..af5dc78 100644
+--- a/src/ejabberd_s2s_in.erl
++++ b/src/ejabberd_s2s_in.erl
+@@ -404,7 +404,7 @@ stream_established({xmlstreamelement, El}, StateData) ->
+             case {ejabberd_s2s:allow_host(LTo, LFrom),
+                   lists:member(LTo, ejabberd_router:dirty_get_all_domains())} of
+                 {true, true} ->
+-		    ejabberd_s2s_out:terminate_if_waiting_delay(LTo, LFrom),
++		    %%ejabberd_s2s_out:terminate_if_waiting_delay(LTo, LFrom),
+ 		    ejabberd_s2s_out:start(LTo, LFrom,
+ 					   {verify, self(),
+ 					    Key, StateData#state.streamid}),
+diff --git a/src/ejabberd_s2s_out.erl b/src/ejabberd_s2s_out.erl
+index 55f48af..fdc9cf4 100644
+--- a/src/ejabberd_s2s_out.erl
++++ b/src/ejabberd_s2s_out.erl
+@@ -93,7 +93,7 @@
+ 						 [From, Host, Type])).
+ -endif.
+ 
+--define(FSMTIMEOUT, 30000).
++-define(FSMTIMEOUT, 60000).
+ 
+ %% We do not block on send anymore.
+ -define(TCP_SEND_TIMEOUT, 15000).
+@@ -245,7 +245,8 @@ open_socket(init, StateData) ->
+ 		    NewStateData = StateData#state{bridge={Mod, Fun}},
+ 		    {next_state, relay_to_bridge, NewStateData};
+ 		_ ->
+-		    wait_before_reconnect(StateData)
++		    %%wait_before_reconnect(StateData)
++		    {stop, normal, StateData}
+ 	    end
+     end;
+ open_socket(closed, StateData) ->
+-- 
+1.7.5.4
+

@@ -1,0 +1,35 @@
+From b030112cc6ddc8e1a36189699db363fde95d46cf Mon Sep 17 00:00:00 2001
+From: Peter Lemenkov <lemenkov@gmail.com>
+Date: Sat, 12 Jun 2010 16:12:11 +0400
+Subject: [PATCH 07/11] Use versioned directory for storing docs
+
+It's also a good idea to store doc-files under the versioned directory.
+This may greatly simplify parallel installation of different versions of
+ejabbed.
+
+Note that this may be done in the other way - by changing proper field
+in the AC_INIT macro, see the explanation of the field 'tarname':
+
+http://www.gnu.org/software/autoconf/manual/html_node/Initializing-configure.html
+
+Signed-off-by: Peter Lemenkov <lemenkov@gmail.com>
+---
+ src/Makefile.in |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 64ed856..43b5e1f 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -98,7 +98,7 @@ SBINDIR = $(DESTDIR)@sbindir@
+ EJABBERDDIR = $(DESTDIR)@libdir@/ejabberd
+ 
+ # /share/doc/ejabberd
+-PACKAGE_TARNAME = @PACKAGE_TARNAME@
++PACKAGE_TARNAME = @PACKAGE_TARNAME@-@PACKAGE_VERSION@
+ datarootdir = @datarootdir@
+ DOCDIR = $(DESTDIR)@docdir@
+ 
+-- 
+1.7.5.4
+

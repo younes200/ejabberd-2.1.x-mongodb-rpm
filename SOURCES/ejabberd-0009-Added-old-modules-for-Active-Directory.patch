@@ -1,0 +1,1266 @@
+From eb9d5f2ed6adc07131a923c3296ce85030b1ddf5 Mon Sep 17 00:00:00 2001
+From: Peter Lemenkov <lemenkov@gmail.com>
+Date: Tue, 14 Dec 2010 18:28:44 +0300
+Subject: [PATCH 09/11] Added old modules for Active Directory
+
+These modules were extracted from a patch found on
+http://realloc.spb.ru/share/ejabberdad.html
+
+Please, note that these are unmaintained and will be removed very
+soon (users should use *_ldap.erl instead).
+---
+ src/ejabberd_auth_ad.erl     |  167 +++++++++++
+ src/mod_shared_roster_ad.erl |  428 ++++++++++++++++++++++++++++
+ src/mod_vcard_ad.erl         |  631 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1226 insertions(+), 0 deletions(-)
+ create mode 100644 src/ejabberd_auth_ad.erl
+ create mode 100644 src/mod_shared_roster_ad.erl
+ create mode 100644 src/mod_vcard_ad.erl
+
+diff --git a/src/ejabberd_auth_ad.erl b/src/ejabberd_auth_ad.erl
+new file mode 100644
+index 0000000..5e9e452
+--- /dev/null
++++ b/src/ejabberd_auth_ad.erl
+@@ -0,0 +1,167 @@
++%%%----------------------------------------------------------------------
++%%% File    : ejabberd_auth_ad.erl
++%%% Author  : Alexey Shchepin <alexey@sevcom.net>
++%%% Author  : Alex Gorbachenko <agent_007@immo.ru>
++%%% Author  : Stanislav Bogatyrev <realloc@realloc.spb.ru>
++%%% Purpose : Authentification via Active Directory
++%%% Created : 12 Dec 2004 by Alexey Shchepin <alexey@sevcom.net>
++%%% Id      : $Id: ejabberd_auth_ad.erl 386 2005-12-20 10:06:37Z agent_007 $
++%%%----------------------------------------------------------------------
++
++-module(ejabberd_auth_ad).
++-author('alexey@sevcom.net').
++-author('agent_007@immo.ru').
++-author('realloc@realloc.spb.ru').
++-vsn('$Revision: 386 $ ').
++
++%% External exports
++-export([start/1,
++	 set_password/3,
++	 check_password/3,
++	 check_password/5,
++	 try_register/3,
++	 dirty_get_registered_users/0,
++	 get_vh_registered_users/1,
++	 get_password/2,
++	 get_password_s/2,
++	 is_user_exists/2,
++	 remove_user/2,
++	 remove_user/3,
++	 plain_password_required/0
++	]).
++
++-include("ejabberd.hrl").
++-include("eldap/eldap.hrl").
++
++%%%----------------------------------------------------------------------
++%%% API
++%%%----------------------------------------------------------------------
++start(Host) ->
++    LDAPServers = ejabberd_config:get_local_option({ad_servers, Host}),
++    RootDN = ejabberd_config:get_local_option({ad_rootdn, Host}),
++    Password = ejabberd_config:get_local_option({ad_password, Host}),
++    eldap:start_link(get_eldap_id(Host, ejabberd),
++		     LDAPServers, 389, RootDN, Password),
++    eldap:start_link(get_eldap_id(Host, ejabberd_bind),
++		     LDAPServers, 389, RootDN, Password),
++    ok.
++
++plain_password_required() ->
++    true.
++
++check_password(User, Server, Password) ->
++    case find_user_dn(User, Server) of
++	false ->
++	    false;
++	DN ->
++	    LServer = jlib:nameprep(Server),
++	    case eldap:bind(get_eldap_id(LServer, ejabberd_bind),
++			    DN, Password) of
++		ok ->
++		    true;
++		_ ->
++		    false
++	    end
++    end.
++
++check_password(User, Server, Password, _StreamID, _Digest) ->
++    check_password(User, Server, Password).
++
++set_password(_User, _Server, _Password) ->
++    {error, not_allowed}.
++
++try_register(_User, _Server, _Password) ->
++    {error, not_allowed}.
++
++dirty_get_registered_users() ->
++    get_vh_registered_users(?MYNAME).
++
++get_vh_registered_users(Server) ->
++    LServer = jlib:nameprep(Server),
++    Attr = ejabberd_config:get_local_option({ad_uidattr, LServer}),
++%    AdGroup = ejabberd_config:get_local_option({ad_group, LServer}),
++    FilterPerson = eldap:equalityMatch("objectCategory", "person"),
++    FilterComp = eldap:equalityMatch("objectClass", "computer"),
++    FilterHidden = eldap:equalityMatch("description", "hidden"),
++%    FilterGroup = eldap:equalityMatch("memberOf", AdGroup),
++    FilterLive = eldap:equalityMatch("userAccountControl", "66050"),
++    FilterDef = eldap:present(Attr),
++    Filter = eldap:'and'([
++			  FilterDef,
++			  FilterPerson,
++%			  FilterGroup,
++			  eldap:'not'(FilterComp),
++			  eldap:'not'(FilterHidden),
++			  eldap:'not'(FilterLive)]),
++    Base = ejabberd_config:get_local_option({ad_base, LServer}),
++    case eldap:search(get_eldap_id(LServer, ejabberd),
++		      [{base, Base},
++		       {filter, Filter},
++		       {attributes, [Attr]}]) of
++	#eldap_search_result{entries = Es} ->
++	    lists:flatmap(
++	      fun(E) ->
++		      case lists:keysearch(Attr, 1, E#eldap_entry.attributes) of
++			  {value, {_, [U]}} ->
++			      case jlib:nodeprep(U) of
++				  error ->
++				      [];
++				  LU ->
++				      [{LU, LServer}]
++			      end;
++			  _ ->
++			      []
++		      end
++	      end, Es);
++	_ ->
++	    []
++    end.
++
++get_password(_User, _Server) ->
++    false.
++
++get_password_s(_User, _Server) ->
++    "".
++
++is_user_exists(User, Server) ->
++    case find_user_dn(User, Server) of
++	false ->
++	    false;
++	_DN ->
++	    true
++    end.
++
++remove_user(_User, _Server) ->
++    {error, not_allowed}.
++
++remove_user(_User, _Server, _Password) ->
++    not_allowed.
++
++
++%%%----------------------------------------------------------------------
++%%% Internal functions
++%%%----------------------------------------------------------------------
++
++find_user_dn(User, Server) ->
++    LServer = jlib:nameprep(Server),
++    AdGroup = ejabberd_config:get_local_option({ad_group, LServer}),
++    Attr = ejabberd_config:get_local_option({ad_uidattr, LServer}),
++    FilterAttr = eldap:equalityMatch(Attr, User),
++    FilterGroup = eldap:equalityMatch("memberOf", AdGroup),
++    Filter = eldap:'and'([
++                          FilterAttr,
++                          FilterGroup
++                          ]),
++    Base = ejabberd_config:get_local_option({ad_base, LServer}),
++    case eldap:search(get_eldap_id(LServer, ejabberd),
++		      [{base, Base},
++		       {filter, Filter},
++		       {attributes, []}]) of
++	#eldap_search_result{entries = [E | _]} ->
++	    E#eldap_entry.object_name;
++	_ ->
++	    false
++    end.
++
++get_eldap_id(Host, Name) ->
++    atom_to_list(gen_mod:get_module_proc(Host, Name)).
+diff --git a/src/mod_shared_roster_ad.erl b/src/mod_shared_roster_ad.erl
+new file mode 100644
+index 0000000..8dc09f1
+--- /dev/null
++++ b/src/mod_shared_roster_ad.erl
+@@ -0,0 +1,428 @@
++%%%----------------------------------------------------------------------
++%%% File    : mod_shared_roster.erl
++%%% Author  : Alexey Shchepin <alexey@sevcom.net>
++%%% Author  : Stanislav Bogatyrev <realloc@realloc.spb.ru>
++%%% Purpose : Shared roster management
++%%% Created :  5 Mar 2005 by Alexey Shchepin <alexey@sevcom.net>
++%%% Id      : $Id: mod_shared_roster_ad.erl,v 1.1 2006/06/23 12:40:03 jcollie Exp $
++%%%----------------------------------------------------------------------
++
++-module(mod_shared_roster_ad).
++-author('alexey@sevcom.net').
++-author('realloc@realloc.spb.ru').
++-vsn('$Revision: 1.1 $ ').
++
++-behaviour(gen_mod).
++
++-export([start/2, stop/1,
++	 get_user_roster/2,
++	 get_subscription_lists/3,
++	 get_jid_info/4,
++	 in_subscription/5,
++	 out_subscription/4,
++	 list_groups/1,
++	 create_group/2,
++	 create_group/3,
++	 delete_group/2,
++	 get_group_opts/2,
++	 set_group_opts/3,
++	 get_group_users/2,
++	 get_group_explicit_users/2,
++	 add_user_to_group/3,
++	 remove_user_from_group/3]).
++
++-include("ejabberd.hrl").
++-include("jlib.hrl").
++-include("mod_roster.hrl").
++-include("eldap/eldap.hrl").
++
++-record(sr_group, {group_host, opts}).
++-record(sr_user, {us, group_host}).
++
++start(Host, _Opts) ->
++    mnesia:create_table(sr_group,
++			[{disc_copies, [node()]},
++			 {attributes, record_info(fields, sr_group)}]),
++    mnesia:create_table(sr_user,
++			[{disc_copies, [node()]},
++			 {type, bag},
++			 {attributes, record_info(fields, sr_user)}]),
++    mnesia:add_table_index(sr_user, group_host),
++    ejabberd_hooks:add(roster_get, Host,
++		       ?MODULE, get_user_roster, 70),
++    ejabberd_hooks:add(roster_in_subscription, Host,
++        	       ?MODULE, in_subscription, 30),
++    ejabberd_hooks:add(roster_out_subscription, Host,
++        	       ?MODULE, out_subscription, 30),
++    ejabberd_hooks:add(roster_get_subscription_lists, Host,
++		       ?MODULE, get_subscription_lists, 70),
++    ejabberd_hooks:add(roster_get_jid_info, Host,
++        	       ?MODULE, get_jid_info, 70),
++    
++    %ejabberd_hooks:add(remove_user, Host,
++    %    	       ?MODULE, remove_user, 50),
++    LDAPServers = ejabberd_config:get_local_option({ad_servers, Host}),
++    RootDN = ejabberd_config:get_local_option({ad_rootdn, Host}),
++    Password = ejabberd_config:get_local_option({ad_password, Host}),
++    eldap:start_link("mod_shared_roster_ad", LDAPServers, 389, RootDN, Password).
++   
++
++  
++stop(Host) ->
++    ejabberd_hooks:delete(roster_get, Host,
++			  ?MODULE, get_user_roster, 70),
++    ejabberd_hooks:delete(roster_in_subscription, Host,
++        		  ?MODULE, in_subscription, 30),
++    ejabberd_hooks:delete(roster_out_subscription, Host,
++        		  ?MODULE, out_subscription, 30),
++    ejabberd_hooks:delete(roster_get_subscription_lists, Host,
++        		  ?MODULE, get_subscription_lists, 70),
++    ejabberd_hooks:delete(roster_get_jid_info, Host,
++        		  ?MODULE, get_jid_info, 70).
++    %ejabberd_hooks:delete(remove_user, Host,
++    %    		  ?MODULE, remove_user, 50),
++
++
++get_user_roster(Items, US) ->
++    {U, S} = US,
++    DisplayedGroups = get_user_displayed_groups_ad(US),
++    SRUsers = 
++	lists:foldl(
++	  fun(Group, Acc1) ->
++		  lists:foldl(
++		    fun(User, Acc2) ->
++			    dict:append(User, Group, Acc2)
++		    end, Acc1, get_group_users_ad(S, Group))
++	  end, dict:new(), DisplayedGroups),
++    {NewItems1, SRUsersRest} =
++	lists:mapfoldl(
++	  fun(Item, SRUsers1) ->
++		  {_, _, {U1, S1, _}} = Item#roster.usj,
++		  US1 = {U1, S1},
++		  case dict:find(US1, SRUsers1) of
++		      {ok, _GroupNames} ->
++			  {Item#roster{subscription = both, ask = none},
++			   dict:erase(US1, SRUsers1)};
++		      error ->
++			  {Item, SRUsers1}
++		  end
++	  end, SRUsers, Items),
++    SRItems = [#roster{usj = {U, S, {U1, S1, ""}},
++		       us = US,
++		       jid = {U1, S1, ""},
++		       name = get_user_fn(U1,S1),
++		       subscription = both,
++		       ask = none,
++		       groups = GroupNames} ||
++		  {{U1, S1}, GroupNames} <- dict:to_list(SRUsersRest)],
++    SRItems ++ NewItems1.
++
++get_subscription_lists({F, T}, User, Server) ->
++    LUser = jlib:nodeprep(User),
++    LServer = jlib:nameprep(Server),
++    US = {LUser, LServer},
++    DisplayedGroups = get_user_displayed_groups_ad(US),
++    SRUsers =
++	lists:usort(
++	  lists:flatmap(
++	    fun(Group) ->
++		    get_group_users_ad(LServer, Group)
++	    end, DisplayedGroups)),
++    SRJIDs = [{U1, S1, ""} || {U1, S1} <- SRUsers],
++    {lists:usort(SRJIDs ++ F), lists:usort(SRJIDs ++ T)}.
++
++get_jid_info({Subscription, Groups}, User, Server, JID) ->
++    LUser = jlib:nodeprep(User),
++    LServer = jlib:nameprep(Server),
++    US = {LUser, LServer},
++    {U1, S1, _} = jlib:jid_tolower(JID),
++    US1 = {U1, S1},
++    DisplayedGroups = get_user_displayed_groups_ad(US),
++    SRUsers = 
++	lists:foldl(
++	  fun(Group, Acc1) ->
++		  lists:foldl(
++		    fun(User1, Acc2) ->
++			    dict:append(
++			      User1, Group, Acc2)
++		    end, Acc1, get_group_users_ad(LServer, Group))
++	  end, dict:new(), DisplayedGroups),
++    case dict:find(US1, SRUsers) of
++	{ok, GroupNames} ->
++	    NewGroups = if
++			    Groups == [] -> GroupNames;
++			    true -> Groups
++			end,
++	    {both, NewGroups};
++	error ->
++	    {Subscription, Groups}
++    end.
++
++in_subscription(Acc, User, Server, JID, Type) ->
++    process_subscription(in, User, Server, JID, Type, Acc).
++
++out_subscription(User, Server, JID, Type) ->
++    process_subscription(out, User, Server, JID, Type, false).
++
++process_subscription(Direction, User, Server, JID, _Type, Acc) ->
++    LUser = jlib:nodeprep(User),
++    LServer = jlib:nameprep(Server),
++    US = {LUser, LServer},
++    {U1, S1, _} = jlib:jid_tolower(jlib:jid_remove_resource(JID)),
++    US1 = {U1, S1},
++    DisplayedGroups = get_user_displayed_groups_ad(US),
++    SRUsers =
++	lists:usort(
++	  lists:flatmap(
++	    fun(Group) ->
++		    get_group_users_ad(LServer, Group)
++	    end, DisplayedGroups)),
++    case lists:member(US1, SRUsers) of
++	true ->
++	    case Direction of
++		in ->
++		    {stop, false};
++		out ->
++		    stop
++	    end;
++	false ->
++	    Acc
++    end.
++
++list_groups(Host) ->
++    get_user_displayed_groups_ad({"",Host}).
++
++
++create_group(Host, Group) ->
++    create_group(Host, Group, []).
++
++create_group(Host, Group, Opts) ->
++    R = #sr_group{group_host = {Group, Host}, opts = Opts},
++    F = fun() ->
++		mnesia:write(R)
++	end,
++    mnesia:transaction(F).
++
++delete_group(Host, Group) ->
++    F = fun() ->
++		mnesia:delete({sr_group, {Group, Host}})
++	end,
++    mnesia:transaction(F).
++
++get_group_opts(Host, Group) ->
++    case catch mnesia:dirty_read(sr_group, {Group, Host}) of
++	[#sr_group{opts = Opts}] ->
++	    Opts;
++	_ ->
++	    error
++    end.
++
++set_group_opts(Host, Group, Opts) ->
++    R = #sr_group{group_host = {Group, Host}, opts = Opts},
++    F = fun() ->
++		mnesia:write(R)
++	end,
++    mnesia:transaction(F).
++
++
++
++get_user_groups(US) ->
++    Host = element(2, US),
++    case catch mnesia:dirty_read(sr_user, US) of
++	Rs when is_list(Rs) ->
++	    [Group || #sr_user{group_host = {Group, H}} <- Rs, H == Host];
++	_ ->
++	    []
++    end ++ get_all_users_groups(Host).
++
++is_group_enabled(Host, Group) ->
++    case catch mnesia:dirty_read(sr_group, {Group, Host}) of
++	[#sr_group{opts = Opts}] ->
++	    not lists:member(disabled, Opts);
++	_ ->
++	    false
++    end.
++
++get_group_opt(Host, Group, Opt, Default) ->
++    case catch mnesia:dirty_read(sr_group, {Group, Host}) of
++	[#sr_group{opts = Opts}] ->
++	    case lists:keysearch(Opt, 1, Opts) of
++		{value, {_, Val}} ->
++		    Val;
++		false ->
++		    Default
++	    end;
++	_ ->
++	    false
++    end.
++
++get_group_users(Host, Group) ->
++    case get_group_opt(Host, Group, all_users, false) of
++	true ->
++	    ejabberd_auth:get_vh_registered_users(Host);
++	false ->
++	    []
++    end ++ get_group_explicit_users(Host, Group).
++
++get_group_explicit_users(Host, Group) ->
++    case catch mnesia:dirty_index_read(
++		 sr_user, {Group, Host}, #sr_user.group_host) of
++	Rs when is_list(Rs) ->
++	    [R#sr_user.us || R <- Rs];
++	_ ->
++	    []
++    end.
++
++get_group_name(Host, Group) ->
++    get_group_opt(Host, Group, name, Group).
++
++get_all_users_groups(Host) ->
++    lists:filter(
++      fun(Group) -> get_group_opt(Host, Group, all_users, false) end,
++      list_groups(Host)).
++
++get_user_displayed_groups(US) ->
++    Host = element(2, US),
++    DisplayedGroups1 =
++	lists:usort(
++	  lists:flatmap(
++	    fun(Group) ->
++		    case is_group_enabled(Host, Group) of
++			true ->
++			    get_group_opt(Host, Group, displayed_groups, []);
++			false ->
++			    []
++		    end
++	    end, get_user_groups(US))),
++    [Group || Group <- DisplayedGroups1, is_group_enabled(Host, Group)].
++
++
++
++
++add_user_to_group(Host, US, Group) ->
++    R = #sr_user{us = US, group_host = {Group, Host}},
++    F = fun() ->
++		mnesia:write(R)
++	end,
++    mnesia:transaction(F).
++
++remove_user_from_group(Host, US, Group) ->
++    R = #sr_user{us = US, group_host = {Group, Host}},
++    F = fun() ->
++		mnesia:delete_object(R)
++	end,
++    mnesia:transaction(F).
++
++
++
++find_user_attr(User, Host) ->
++    Attr = ejabberd_config:get_local_option({ad_uidattr, Host}),
++    Filter = eldap:equalityMatch(Attr, User),
++    Base = ejabberd_config:get_local_option({ad_base, Host}),
++    
++    case eldap:search("mod_shared_roster_ad",
++                      [{base, Base},
++                       {filter, Filter},
++                       {attributes, []}]) of
++        #eldap_search_result{entries = [E | _]} ->
++            E;
++        _ ->
++            false
++    end.
++
++get_user_displayed_groups_ad(US) ->
++    {_, Host} = US,
++    AdGroup = ejabberd_config:get_local_option({ad_group, Host}),
++    FilterGroup = eldap:equalityMatch("memberOf", AdGroup),
++    Base = ejabberd_config:get_local_option({ad_base, Host}),
++    
++    case eldap:search("mod_shared_roster_ad",
++                      [{base, Base},
++                       {filter, FilterGroup},
++                       {attributes, []}]) of
++        #eldap_search_result{entries = E} ->
++	    lists:usort(lists:map(
++	      fun(X) ->
++		      case X of
++			  #eldap_entry{attributes = Attributes} ->
++			      ldap_get_value(Attributes,"department");
++			  false ->
++			      ""	    
++		      end
++		      end, E
++	     ));
++	    
++        _ ->
++            []
++    end.
++
++get_eldap_id(Host, Name) ->
++    atom_to_list(gen_mod:get_module_proc(Host, Name)).
++
++
++get_group_users_ad(Host, Group) ->
++    Attr = ejabberd_config:get_local_option({ad_uidattr, Host}),
++%    AdGroup = ejabberd_config:get_local_option({ad_group, Host}),
++    FilterPerson = eldap:equalityMatch("objectCategory", "person"),
++    FilterComp = eldap:equalityMatch("objectClass", "computer"),
++    FilterHidden = eldap:equalityMatch("description", "hidden"),
++%    FilterGroup = eldap:equalityMatch("memberOf", AdGroup),
++    FilterDep = eldap:equalityMatch("department", Group),
++    FilterLive = eldap:equalityMatch("userAccountControl", "66050"),
++    FilterDef = eldap:present(Attr),
++    Filter = eldap:'and'([
++			  FilterDef,
++			  FilterPerson,
++%			  FilterGroup,
++			  FilterDep,
++			  eldap:'not'(FilterComp),
++			  eldap:'not'(FilterHidden),
++			  eldap:'not'(FilterLive)]),
++    Base = ejabberd_config:get_local_option({ad_base, Host}),
++    case eldap:search(get_eldap_id(Host, ejabberd),
++		      [{base, Base},
++		       {filter, Filter},
++		       {attributes, [Attr]}]) of
++	#eldap_search_result{entries = Es} ->
++	    lists:flatmap(
++	      fun(E) ->
++		      case lists:keysearch(Attr, 1, E#eldap_entry.attributes) of
++			  {value, {_, [U]}} ->
++			      case jlib:nodeprep(U) of
++				  error ->
++				      [];
++				  LU ->
++				      [{LU, Host}]
++			      end;
++			  _ ->
++			      []
++		      end
++	      end, Es);
++	_ ->
++	    []
++    end.
++
++
++
++
++
++ldap_get_value(E,Attribute) ->
++    case lists:filter(fun({A,_}) ->
++			      string:equal(A,Attribute)
++		      end,E) of
++	[{_,[Value|_]}] ->
++	    Value;
++	_ -> 
++	    none
++    end.
++
++get_user_fn(User, Host) ->
++    case find_user_attr(User,Host) of
++	#eldap_entry{attributes = Attributes} ->
++	    ldap_get_value(Attributes,"cn");
++	
++	false ->
++	    ""	    
++    end.
++
++
+diff --git a/src/mod_vcard_ad.erl b/src/mod_vcard_ad.erl
+new file mode 100644
+index 0000000..52ddbec
+--- /dev/null
++++ b/src/mod_vcard_ad.erl
+@@ -0,0 +1,631 @@
++
++%%%----------------------------------------------------------------------
++%%% File    : mod_vcard_ad.erl
++%%% Author  : Stanislav Bogatyrev <realloc@realloc.spb.ru>
++%%% Author  : Alexey Shchepin <alexey@sevcom.net>
++%%% Author  : Alex <agent_007> Gorbachenko (agent_007@immo.ru)
++%%% Purpose : 
++%%% Created :  2 Jan 2003 by Alexey Shchepin <alexey@sevcom.net>
++%%% Id      : $Id: mod_vcard_ad.erl 437 2005-11-19 01:20:05Z agent_007 $
++%%%----------------------------------------------------------------------
++
++-module(mod_vcard_ad).
++-author('realloc@realloc.spb.ru').
++-author('alexey@sevcom.net').
++-author('agent_007@immo.ru').
++-vsn('$Revision: 437 $ ').
++
++-behaviour(gen_mod).
++
++-export([start/2, init/3, stop/1,
++ 	 get_sm_features/5,
++	 process_local_iq/3,
++	 process_sm_iq/3,
++	 remove_user/1]).
++
++-include("ejabberd.hrl").
++-include("eldap/eldap.hrl").
++-include("jlib.hrl").
++
++-define(PROCNAME, ejabberd_mod_vcard_ad).
++
++start(Host, Opts) ->
++    IQDisc = gen_mod:get_opt(iqdisc, Opts, one_queue),
++    gen_iq_handler:add_iq_handler(ejabberd_local, Host, ?NS_VCARD,
++				  ?MODULE, process_local_iq, IQDisc),
++    gen_iq_handler:add_iq_handler(ejabberd_sm, Host, ?NS_VCARD,
++				  ?MODULE, process_sm_iq, IQDisc),
++    ejabberd_hooks:add(disco_sm_features, Host, ?MODULE, get_sm_features, 50),
++    LDAPServers = ejabberd_config:get_local_option({ad_servers, Host}),
++    RootDN = ejabberd_config:get_local_option({ad_rootdn, Host}),
++    Password = ejabberd_config:get_local_option({ad_password, Host}),
++    eldap:start_link("mod_vcard_ad", LDAPServers, 389, RootDN, Password),
++    MyHost = gen_mod:get_opt(host, Opts, "vjud." ++ Host),
++    Search = gen_mod:get_opt(search, Opts, true),
++    register(gen_mod:get_module_proc(Host, ?PROCNAME),
++	     spawn(?MODULE, init, [MyHost, Host, Search])).
++
++init(Host, ServerHost, Search) ->
++    case Search of
++	false ->
++	    loop(Host, ServerHost);
++	_ ->
++	    ejabberd_router:register_route(Host),
++	    loop(Host, ServerHost)
++    end.
++
++loop(Host, ServerHost) ->
++    receive
++	{route, From, To, Packet} ->
++	    case catch do_route(ServerHost, From, To, Packet) of
++		{'EXIT', Reason} ->
++		    ?ERROR_MSG("~p", [Reason]);
++		_ ->
++		    ok
++	    end,
++	    loop(Host, ServerHost);
++	stop ->
++	    ejabberd_router:unregister_route(Host),
++	    ok;
++	_ ->
++	    loop(Host, ServerHost)
++    end.
++
++stop(Host) ->
++    gen_iq_handler:remove_iq_handler(ejabberd_local, Host, ?NS_VCARD),
++    gen_iq_handler:remove_iq_handler(ejabberd_sm, Host, ?NS_VCARD),
++    ejabberd_hooks:delete(disco_sm_features, Host, ?MODULE, get_sm_features, 50),
++    Proc = gen_mod:get_module_proc(Host, ?PROCNAME),
++    Proc ! stop,
++    {wait, Proc}.
++
++get_sm_features({error, _Error} = Acc, _From, _To, _Node, _Lang) ->
++    Acc;
++get_sm_features(Acc, _From, _To, Node, _Lang) ->
++    case Node of
++ 	[] ->
++ 	    case Acc of
++ 		{result, Features} ->
++ 		    {result, [?NS_VCARD | Features]};
++ 		empty ->
++ 		    {result, [?NS_VCARD]}
++ 	    end;
++  	_ ->
++ 	    Acc
++    end.
++
++process_local_iq(_From, _To, #iq{type = Type, lang = Lang, sub_el = SubEl} = IQ) ->
++    case Type of
++	set ->
++	    IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]};
++	get ->
++	    IQ#iq{type = result,
++		  sub_el = [{xmlelement, "vCard",
++			     [{"xmlns", ?NS_VCARD}],
++			     [{xmlelement, "FN", [],
++			       [{xmlcdata, "ejabberd"}]},
++			      {xmlelement, "URL", [],
++			       [{xmlcdata,
++				 "http://ejabberd.jabberstudio.org/"}]},
++			      {xmlelement, "DESC", [],
++			       [{xmlcdata,
++				 translate:translate(
++				   Lang,
++				   "Erlang Jabber Server\n"
++				   "Copyright (c) 2002-2005 Alexey Shchepin")}]},
++			      {xmlelement, "BDAY", [],
++			       [{xmlcdata, "2002-11-16"}]}
++			     ]}]}
++    end.
++
++find_ldap_user(Host, User) ->
++    Attr = ejabberd_config:get_local_option({ad_uidattr, Host}),
++    Filter = eldap:equalityMatch(Attr, User),
++    Base = ejabberd_config:get_local_option({ad_base, Host}),
++    case eldap:search("mod_vcard_ad", [{base, Base},
++					 {filter, Filter},
++					 {attributes, []}]) of
++	#eldap_search_result{entries = [E | _]} ->
++	    E;
++	_ ->
++	    false
++    end.
++
++is_attribute_read_allowed(Name,From,To) ->
++    true.
++
++ldap_attribute_to_vcard(Prefix,{Name,Values},From,To) ->
++    case is_attribute_read_allowed(Name,From,To) of 
++	true ->
++	    ldap_lca_to_vcard(Prefix,stringprep:tolower(Name),Values);
++	_ ->
++	    none
++    end.
++
++ldap_lca_to_vcard(vCard,"displayname",[Value|_]) ->
++    {xmlelement,"FN",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCard,"cn",[Value|_]) ->
++    {xmlelement,"NICKNAME",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCard,"title",[Value|_]) ->
++    {xmlelement,"TITLE",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCard,"wwwhomepage",[Value|_]) ->
++    {xmlelement,"URL",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCard,"description",[Value|_]) ->
++    {xmlelement,"DESC",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCard,"telephonenumber",[Value|_]) ->
++    {xmlelement,"TEL",[],[{xmlelement,"VOICE",[],[]},
++			  {xmlelement,"WORK",[],[]},
++			  {xmlelement,"NUMBER",[],[{xmlcdata,Value}]}]};
++
++ldap_lca_to_vcard(vCard,"mail",[Value|_]) ->
++    {xmlelement,"EMAIL",[],[{xmlelement,"INTERNET",[],[]},
++			    {xmlelement,"PREF",[],[]},
++			    {xmlelement,"USERID",[],[{xmlcdata,Value}]}]};
++
++ldap_lca_to_vcard(vCardN,"sn",[Value|_]) ->
++    {xmlelement,"FAMILY",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCardN,"givenname",[Value|_]) ->
++    {xmlelement,"GIVEN",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCardN,"initials",[Value|_]) ->
++    {xmlelement,"MIDDLE",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCardAdr,"streetaddress",[Value|_]) ->
++    {xmlelement,"STREET",[],[{xmlcdata,Value}]};
++ldap_lca_to_vcard(vCardAdr,"co",[Value|_]) ->
++    {xmlelement,"CTRY",[],[{xmlcdata,Value}]};
++ldap_lca_to_vcard(vCardAdr,"l",[Value|_]) ->
++    {xmlelement,"LOCALITY",[],[{xmlcdata,Value}]};
++ldap_lca_to_vcard(vCardAdr,"st",[Value|_]) ->
++    {xmlelement,"REGION",[],[{xmlcdata,Value}]};
++ldap_lca_to_vcard(vCardAdr,"postalcode",[Value|_]) ->
++    {xmlelement,"PCODE",[],[{xmlcdata,Value}]};
++ldap_lca_to_vcard(vCardO,"company",[Value|_]) ->
++    {xmlelement,"ORGNAME",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(vCardO,"department",[Value|_]) ->
++    {xmlelement,"ORGUNIT",[],[{xmlcdata,Value}]};
++
++ldap_lca_to_vcard(_,_,_) -> none.
++
++ldap_attributes_to_vcard(Attributes,From,To) ->
++    Elts = lists:map(fun(Attr) ->
++			     ldap_attribute_to_vcard(vCard,Attr,From,To)
++		     end,Attributes),
++    FElts = [ X || X <- Elts, X /= none ],
++    NElts = lists:map(fun(Attr) ->
++			      ldap_attribute_to_vcard(vCardN,Attr,From,To)
++		      end,Attributes),
++    FNElts = [ X || X <- NElts, X /= none ],
++   
++    ADRElts = lists:map(fun(Attr) ->
++			      ldap_attribute_to_vcard(vCardAdr,Attr,From,To)
++		      end,Attributes),
++    FADRElts = [ X || X <- ADRElts, X /= none ],
++    
++    OElts = lists:map(fun(Attr) ->
++			      ldap_attribute_to_vcard(vCardO,Attr,From,To)
++		      end,Attributes),
++    FOElts = [ X || X <- OElts, X /= none ],
++    [{xmlelement, "vCard", [{"xmlns", ?NS_VCARD}],
++      lists:append(FElts,
++		   [{xmlelement,"N",[],FNElts},
++		    {xmlelement,"ADR",[],FADRElts},
++		    {xmlelement,"ORG",[],FOElts}])
++     }].
++
++process_sm_iq(From, To, #iq{type = Type, sub_el = SubEl} = IQ) ->
++    case Type of
++	set ->
++	    IQ#iq{type = error, sub_el = [SubEl, ?ERR_NOT_ALLOWED]};
++	get ->
++	    #jid{luser = LUser, lserver = LServer} = To,
++	    case find_ldap_user(LServer, LUser) of
++		#eldap_entry{attributes = Attributes} ->
++		    Vcard = ldap_attributes_to_vcard(Attributes,From,To),
++		    IQ#iq{type = result, sub_el = Vcard};
++		_ ->
++		    IQ#iq{type = result, sub_el = []}
++	    end
++	end.
++
++-define(TLFIELD(Type, Label, Var),
++	{xmlelement, "field", [{"type", Type},
++			       {"label", translate:translate(Lang, Label)},
++			       {"var", Var}], []}).
++
++
++-define(FORM(JID),
++	[{xmlelement, "instructions", [],
++	  [{xmlcdata, translate:translate(Lang, "You need an x:data capable client to search")}]},
++	 {xmlelement, "x", [{"xmlns", ?NS_XDATA}, {"type", "form"}],
++	  [{xmlelement, "title", [],
++	    [{xmlcdata, translate:translate(Lang, "Search users in ") ++
++	      jlib:jid_to_string(JID)}]},
++	   {xmlelement, "instructions", [],
++	    [{xmlcdata, translate:translate(Lang, "Fill in fields to search "
++					    "for any matching Jabber User")}]},
++	   ?TLFIELD("text-single", "User", "user"),
++	   ?TLFIELD("text-single", "Full Name", "fn"),
++	   ?TLFIELD("text-single", "Given Name", "given"),
++	   ?TLFIELD("text-single", "Middle Name", "middle"),
++	   ?TLFIELD("text-single", "Family Name", "family"),
++	   ?TLFIELD("text-single", "Nickname", "nickname"),
++	   ?TLFIELD("text-single", "Birthday", "bday"),
++	   ?TLFIELD("text-single", "Country", "ctry"),
++	   ?TLFIELD("text-single", "City", "locality"),
++	   ?TLFIELD("text-single", "email", "email"),
++	   ?TLFIELD("text-single", "Organization Name", "orgname"),
++	   ?TLFIELD("text-single", "Organization Unit", "orgunit")
++	  ]}]).
++
++
++
++
++do_route(ServerHost, From, To, Packet) ->
++    #jid{user = User, resource = Resource} = To,
++    if
++	(User /= "") or (Resource /= "") ->
++	    Err = jlib:make_error_reply(Packet, ?ERR_SERVICE_UNAVAILABLE),
++	    ejabberd_router ! {route, To, From, Err};
++	true ->
++	    IQ = jlib:iq_query_info(Packet),
++	    case IQ of
++		#iq{type = Type, xmlns = ?NS_SEARCH, lang = Lang, sub_el = SubEl} ->
++		    case Type of
++			set ->
++			    XDataEl = find_xdata_el(SubEl),
++			    case XDataEl of
++				false ->
++				    Err = jlib:make_error_reply(
++					    Packet, ?ERR_BAD_REQUEST),
++				    ejabberd_router:route(To, From, Err);
++				_ ->
++				    XData = jlib:parse_xdata_submit(XDataEl),
++				    case XData of
++					invalid ->
++					    Err = jlib:make_error_reply(
++						    Packet,
++						    ?ERR_BAD_REQUEST),
++					    ejabberd_router:route(To, From,
++								  Err);
++					_ ->
++					    ResIQ =
++						IQ#iq{
++						  type = result,
++						  sub_el =
++						  [{xmlelement,
++						    "query",
++						    [{"xmlns", ?NS_SEARCH}],
++						    [{xmlelement, "x",
++						      [{"xmlns", ?NS_XDATA},
++						       {"type", "result"}],
++						      search_result(Lang, To, ServerHost, XData)
++						     }]}]},
++					    ejabberd_router:route(
++					      To, From, jlib:iq_to_xml(ResIQ))
++				    end
++			    end;
++			get ->
++			    ResIQ = IQ#iq{type = result,
++					  sub_el = [{xmlelement,
++						     "query",
++						     [{"xmlns", ?NS_SEARCH}],
++						     ?FORM(To)
++						    }]},
++			    ejabberd_router:route(To,
++						  From,
++						  jlib:iq_to_xml(ResIQ))
++		    end;
++		#iq{type = Type, xmlns = ?NS_DISCO_INFO, sub_el = SubEl} ->
++		    case Type of
++			set ->
++			    Err = jlib:make_error_reply(
++				    Packet, ?ERR_NOT_ALLOWED),
++			    ejabberd_router:route(To, From, Err);
++			get ->
++			    ResIQ =
++				IQ#iq{type = result,
++				      sub_el = [{xmlelement,
++						 "query",
++						 [{"xmlns", ?NS_DISCO_INFO}],
++						 [{xmlelement, "identity",
++						   [{"category", "directory"},
++						    {"type", "user"},
++						    {"name",
++						     "vCard User Search"}],
++						   []},
++						  {xmlelement, "feature",
++						   [{"var", ?NS_SEARCH}], []},
++						  {xmlelement, "feature",
++						   [{"var", ?NS_VCARD}], []}
++						 ]
++						}]},
++			    ejabberd_router:route(To,
++						  From,
++						  jlib:iq_to_xml(ResIQ))
++		    end;
++		#iq{type = Type, xmlns = ?NS_DISCO_ITEMS, sub_el = SubEl} ->
++		    case Type of
++			set ->
++			    Err = jlib:make_error_reply(
++				    Packet, ?ERR_NOT_ALLOWED),
++			    ejabberd_router:route(To, From, Err);
++			get ->
++			    ResIQ = 
++				IQ#iq{type = result,
++				      sub_el = [{xmlelement,
++						 "query",
++						 [{"xmlns", ?NS_DISCO_ITEMS}],
++						 []}]},
++			    ejabberd_router:route(To,
++						  From,
++						  jlib:iq_to_xml(ResIQ))
++		    end;
++		#iq{type = get, xmlns = ?NS_VCARD, lang = Lang} ->
++		    ResIQ = 
++			IQ#iq{type = result,
++			      sub_el = [{xmlelement,
++					 "vCard",
++					 [{"xmlns", ?NS_VCARD}],
++					 iq_get_vcard(Lang)}]},
++		    ejabberd_router:route(To,
++					  From,
++					  jlib:iq_to_xml(ResIQ));
++		_ ->
++		    Err = jlib:make_error_reply(Packet,
++						?ERR_SERVICE_UNAVAILABLE),
++		    ejabberd_router:route(To, From, Err)
++	    end
++    end.
++
++iq_get_vcard(Lang) ->
++    [{xmlelement, "FN", [],
++      [{xmlcdata, "ejabberd/mod_vcard"}]},
++     {xmlelement, "URL", [],
++      [{xmlcdata,
++        "http://ejabberd.jabberstudio.org/"}]},
++     {xmlelement, "DESC", [],
++      [{xmlcdata, translate:translate(
++		    Lang,
++		    "ejabberd vCard module\n"
++		    "Copyright (c) 2003-2005 Alexey Shchepin")}]}].
++
++find_xdata_el({xmlelement, _Name, _Attrs, SubEls}) ->
++    find_xdata_el1(SubEls).
++
++find_xdata_el1([]) ->
++    false;
++find_xdata_el1([{xmlelement, Name, Attrs, SubEls} | Els]) ->
++    case xml:get_attr_s("xmlns", Attrs) of
++	?NS_XDATA ->
++	    {xmlelement, Name, Attrs, SubEls};
++	_ ->
++	    find_xdata_el1(Els)
++    end;
++find_xdata_el1([_ | Els]) ->
++    find_xdata_el1(Els).
++
++-define(LFIELD(Label, Var),
++	{xmlelement, "field", [{"label", translate:translate(Lang, Label)},
++			       {"var", Var}], []}).
++
++search_result(Lang, JID, ServerHost, Data) ->
++    [{xmlelement, "title", [],
++      [{xmlcdata, translate:translate(Lang, "Results of search in ") ++
++	jlib:jid_to_string(JID)}]},
++     {xmlelement, "reported", [],
++      [?LFIELD("JID", "jid"),
++       ?LFIELD("Full Name", "fn"),
++       ?LFIELD("Given Name", "given"),
++       ?LFIELD("Middle Name", "middle"),
++       ?LFIELD("Family Name", "family"),
++       ?LFIELD("Nickname", "nickname"),
++       ?LFIELD("Birthday", "bday"),
++       ?LFIELD("Country", "ctry"),
++       ?LFIELD("City", "locality"),
++       ?LFIELD("email", "email"),
++       ?LFIELD("Organization Name", "orgname"),
++       ?LFIELD("Organization Unit", "orgunit")
++      ]}] ++ lists:map(fun(E) -> 
++			       record_to_item(E#eldap_entry.attributes)
++		       end, search(ServerHost, Data)).
++
++-define(FIELD(Var, Val),
++	{xmlelement, "field", [{"var", Var}],
++	 [{xmlelement, "value", [],
++	   [{xmlcdata, Val}]}]}).
++
++case_exact_compare(none,_) ->
++    false;
++case_exact_compare(_,none) ->
++    false;
++case_exact_compare(X,Y) ->
++    X > Y.
++
++ldap_sort_entries(L) ->
++    lists:sort(fun(E1,E2) ->
++		       case_exact_compare(ldap_get_value(E1,"cn"),ldap_get_value(E2,"cn"))
++	       end,L).
++
++ldap_get_value(E,Attribute) ->
++    #eldap_entry{attributes = Attributes} = E,
++    case lists:filter(fun({A,_}) ->
++			      string:equal(A,Attribute)
++		      end,Attributes) of
++	[{Attr,[Value|_]}] ->
++	    Value;
++	_ -> 
++	    none
++    end.
++
++ldap_attribute_to_item("samaccountname",Value) ->
++    [
++     ?FIELD("jid",Value ++ "@" ++ ?MYNAME),
++     ?FIELD("uid",Value)
++    ];
++
++ldap_attribute_to_item("cn",Value) ->
++    [
++     ?FIELD("nickname",Value)
++    ];
++
++ldap_attribute_to_item("displayname",Value) ->
++    [
++     ?FIELD("fn",Value)
++    ];
++
++ldap_attribute_to_item("sn",Value) ->
++    [
++     ?FIELD("family",Value)
++    ];
++ldap_attribute_to_item("co",Value) ->
++    [
++     ?FIELD("ctry",Value)
++    ];
++ldap_attribute_to_item("l",Value) ->
++    [
++     ?FIELD("locality",Value)
++    ];
++
++ldap_attribute_to_item("givenname",Value) ->
++    [
++     ?FIELD("given",Value)
++    ];
++
++ldap_attribute_to_item("initials",Value) ->
++    [
++     ?FIELD("middle",Value)
++    ];
++
++ldap_attribute_to_item("mail",Value) ->
++    [
++     ?FIELD("email",Value)
++    ];
++
++ldap_attribute_to_item("company",Value) ->
++    [
++     ?FIELD("orgname",Value)
++    ];
++
++ldap_attribute_to_item("department",Value) ->
++    [
++     ?FIELD("orgunit",Value)
++    ];
++
++ldap_attribute_to_item(_,_) ->
++    [none].
++
++record_to_item(Attributes) ->
++    List = lists:append(lists:map(fun({Attr,[Value|_]}) -> 
++					  ldap_attribute_to_item(stringprep:tolower(Attr),Value)
++				  end,Attributes)),
++    FList = [X || X <- List, X /= none],
++    {xmlelement, "item", [],FList}.
++
++search(LServer, Data) ->
++%    AdGroup = ejabberd_config:get_local_option({ad_group, LServer}),
++    FilterDef = make_filter(Data),
++    FilterPerson =  eldap:equalityMatch("objectCategory", "person"),
++    FilterComp = eldap:equalityMatch("objectClass", "computer"),
++    FilterHidden = eldap:equalityMatch("description", "hidden"),
++%    FilterGroup = eldap:equalityMatch("memberOf", AdGroup),
++    FilterLive = eldap:equalityMatch("userAccountControl", "66050"),
++    Filter = eldap:'and'([
++			  FilterDef,
++			  FilterPerson,
++%			  FilterGroup,
++			  eldap:'not'(FilterComp),
++			  eldap:'not'(FilterHidden),
++			  eldap:'not'(FilterLive)]),
++    Base = ejabberd_config:get_local_option({ad_base, LServer}),
++    UIDAttr = ejabberd_config:get_local_option({ad_uidattr, LServer}),
++    case eldap:search("mod_vcard_ad",[{base, Base},
++					{filter, Filter},
++					{attributes, []}]) of
++	#eldap_search_result{entries = E} ->
++	    [X || X <- E,
++		  ejabberd_auth:is_user_exists(
++		    ldap_get_value(X, UIDAttr), LServer)];
++	Err ->
++	    ?ERROR_MSG("Bad search: ~p", [[LServer, {base, Base},
++					{filter, Filter},
++					{attributes, []}]])
++    end.
++
++
++make_filter(Data) ->
++    Filter = [X || X <- lists:map(fun(R) -> 
++					  make_assertion(R)
++				  end, Data),
++		   X /= none ],
++    case Filter of
++	[F] -> 
++	    F;
++	_ ->
++	    eldap:'and'(Filter)
++    end.
++
++
++make_assertion("givenName",Value) ->
++    eldap:substrings("givenName",[{any,Value}]);
++
++make_assertion("cn",Value) ->
++    eldap:substrings("cn",[{any,Value}]);
++
++make_assertion("sn",Value) ->
++    eldap:substrings("sn",[{any,Value}]);
++
++make_assertion(Attr, Value) ->
++    eldap:equalityMatch(Attr,Value).
++
++make_assertion({SVar, [Val]}) ->
++    LAttr = ldap_attribute(SVar),
++    case LAttr of
++	none ->
++	    none;
++	_ ->
++	    if 
++		is_list(Val) and (Val /= "") ->
++		    make_assertion(LAttr,Val);
++		true ->
++		    none
++	    end
++    end.
++
++ldap_attribute("user") ->
++    "samaccountname";
++
++ldap_attribute("fn") ->
++    "cn";
++
++ldap_attribute("family") ->
++    "sn";
++
++ldap_attribute("given") ->
++    "givenName";
++
++ldap_attribute("middle") ->
++    "initials";
++
++ldap_attribute("email") ->
++    "mail";
++
++ldap_attribute("orgname") ->
++    "company";
++
++ldap_attribute("orgunit") ->
++    "department";
++
++ldap_attribute(_) ->
++    none.
++
++remove_user(User) ->
++    true.
++
+-- 
+1.7.5.4
+

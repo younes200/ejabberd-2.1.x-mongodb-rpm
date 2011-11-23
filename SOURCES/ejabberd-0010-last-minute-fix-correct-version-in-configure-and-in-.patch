@@ -1,0 +1,43 @@
+From 534d23df2e6108e762a294e91280afdab1412a1e Mon Sep 17 00:00:00 2001
+From: Peter Lemenkov <lemenkov@gmail.com>
+Date: Tue, 14 Dec 2010 18:52:04 +0300
+Subject: [PATCH 10/11] last minute fix - correct version in configure and in
+ *.app file
+
+Signed-off-by: Peter Lemenkov <lemenkov@gmail.com>
+---
+ src/configure    |    4 ++--
+ src/ejabberd.app |    2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/configure b/src/configure
+index 89e32a5..f377732 100755
+--- a/src/configure
++++ b/src/configure
+@@ -560,8 +560,8 @@ MAKEFLAGS=
+ # Identity of this package.
+ PACKAGE_NAME='ejabberd'
+ PACKAGE_TARNAME='ejabberd'
+-PACKAGE_VERSION='2.1.x'
+-PACKAGE_STRING='ejabberd 2.1.x'
++PACKAGE_VERSION='2.1.8'
++PACKAGE_STRING='ejabberd 2.1.8'
+ PACKAGE_BUGREPORT='ejabberd@process-one.net'
+ PACKAGE_URL=''
+ 
+diff --git a/src/ejabberd.app b/src/ejabberd.app
+index a0154d4..3e54603 100644
+--- a/src/ejabberd.app
++++ b/src/ejabberd.app
+@@ -2,7 +2,7 @@
+ 
+ {application, ejabberd,
+  [{description, "ejabberd"},
+-  {vsn, "2.1.7"},
++  {vsn, "2.1.8"},
+   {modules, [acl,
+ 	     adhoc,
+ 	     configure,
+-- 
+1.7.5.4
+
